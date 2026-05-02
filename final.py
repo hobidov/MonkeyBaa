@@ -1,15 +1,5 @@
-import streamlit as st
-
-api_key = st.secrets.get("TOGETHER_API_KEY")
-
-if not api_key:
-    st.error("API key not found. Please add TOGETHER_API_KEY in Streamlit secrets.")
-    st.stop()
-
-client = OpenAI(
-    api_key=api_key,
-    base_url="https://api.together.xyz/v1"
-)
+import os
+from dotenv import load_dotenv
 import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -179,11 +169,31 @@ def run_normalizer(kind: str, value: Any) -> Optional[int]:
         return normalize_overall_experience(value)
     return None
 
+def normalize_show_name(name: str) -> str:
+    name = safe(name).lower()
+
+    if "green sheep" in name:
+        return "Where is the Green Sheep"
+
+    if "edward" in name:
+        return "Edward the Emu"
+
+    if "josephine" in name:
+        return "Josephine Wants To Dance"
+
+    if "possum" in name:
+        return "Possum Magic"
+
+    if "peasant" in name:
+        return "The Peasant Prince"
+
+    return name.title() if name else "Unknown show"
+
 def map_survey_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     mapped: List[Dict[str, Any]] = []
     for row in rows:
         audience = infer_audience(row)
-        show = infer_show(row)
+        show = normalize_show_name(infer_show(row))
         location = infer_location(row)
         for rule in MAPPING_RULES:
             score = run_normalizer(rule["normalizer"], row.get(rule["sourceColumn"]))
@@ -263,15 +273,16 @@ def compute_analytics(filtered_rows: List[Dict[str, Any]], source_row_count: int
 
 def build_bot_reply(prompt: str, analytics: Dict[str, Any]) -> str:
 
-    context = {
-        "overall_score": analytics["overall"],
-        "strongest_area": analytics["strongest"]["label"],
-        "strongest_value": analytics["strongest"]["value"],
-        "weakest_area": analytics["weakest"]["label"],
-        "weakest_value": analytics["weakest"]["value"],
-    }
+    try:
+        context = {
+            "overall_score": analytics["overall"],
+            "strongest_area": analytics["strongest"]["label"],
+            "strongest_value": analytics["strongest"]["value"],
+            "weakest_area": analytics["weakest"]["label"],
+            "weakest_value": analytics["weakest"]["value"],
+        }
 
-    system_prompt = f"""
+        system_prompt = f"""
 You are an expert data analyst for Monkey Baa Theatre.
 
 Rules:
@@ -283,21 +294,90 @@ DATA:
 {context}
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="meta-llama/Llama-3-70b-chat-hf",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ]
-        )
+        import requests
+        import os
 
-        return response.choices[0].message.content
+        api_key = os.getenv("TOGETHER_API_KEY")
+
+        response = requests.post(
+            "https://api.together.xyz/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "meta-llama/Meta-Llama-3-8B-Instruct-Lite",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 300,
+                "temperature": 0.7
+            }
+        )
+        result = response.json()
+
+# DEBUG SAFETY (VERY IMPORTANT)
+        if "choices" not in result:
+           return f"API Error: {result}"
+        return response.json()["choices"][0]["message"]["content"]
 
     except Exception as e:
         return f"Error: {str(e)}"
+    
+def generate_ai_summary_together(analytics: Dict[str, Any]) -> str:
+    import requests
+    import os
+
+    api_key = os.getenv("TOGETHER_API_KEY")
+
+    context = {
+        "overall": analytics["overall"],
+        "strongest": analytics["strongest"]["label"],
+        "strongest_value": analytics["strongest"]["value"],
+        "weakest": analytics["weakest"]["label"],
+        "weakest_value": analytics["weakest"]["value"],
+        "kpis": {k["label"]: k["value"] for k in analytics["kpis"]}
+    }
+
+    prompt = f"""
+You are an expert arts impact analyst.
+
+Write:
+- 1 short executive summary paragraph
+- 3 bullet insights
+- 1 recommendation
+
+Use ONLY this data:
+{context}
+"""
+
+    response = requests.post(
+        "https://api.together.xyz/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "meta-llama/Meta-Llama-3-8B-Instruct-Lite",
+            "messages": [
+                {"role": "system", "content": "You are a professional analyst."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 300
+        }
+    )
+
+    result = response.json()
+
+    if "choices" not in result:
+        return f"AI Summary Error: {result}"
+
+    return result["choices"][0]["message"]["content"]
 
 def create_report_text(analytics: Dict[str, Any], summary_name: Optional[str] = None) -> str:
+    ai_summary = generate_ai_summary_together(analytics)
     strongest = analytics["strongest"]
     weakest = analytics["weakest"]
     social_spark = find_kpi(analytics["kpis"], "Social Spark")
@@ -306,33 +386,12 @@ def create_report_text(analytics: Dict[str, Any], summary_name: Optional[str] = 
     cultural_spark = find_kpi(analytics["kpis"], "Cultural Spark")
     cultural_growth = find_kpi(analytics["kpis"], "Cultural Growth")
     cultural_horizon = find_kpi(analytics["kpis"], "Cultural Horizon")
-    return f"""Executive Summary
+    return f"""
+EXECUTIVE SUMMARY (AI GENERATED)
 
-Survey responses from {summary_name or 'the uploaded survey'} indicate stronger immediate outcomes in {lower(strongest['label'])} and weaker performance in {lower(weakest['label'])}. Overall impact is {analytics['overall']}%, showing that both social and cultural impact streams now include spark, growth, and horizon proxy measures.
+{ai_summary}
 
-Key Findings
-
-- Strongest dashboard area: {strongest['label']} ({strongest['value']}%)
-- Weakest dashboard area: {weakest['label']} ({weakest['value']}%)
-- Social Spark scored {social_spark['value']}%, Social Growth scored {social_growth['value']}%, and Social Horizon scored {social_horizon['value']}%
-- Cultural Spark scored {cultural_spark['value']}%, Cultural Growth scored {cultural_growth['value']}%, and Cultural Horizon scored {cultural_horizon['value']}%
-
-Social Outcomes (Spark → Growth → Horizon)
-
-- Social Spark is performing at {social_spark['value']}%
-- Social Growth is performing at {social_growth['value']}%
-- Social Horizon is performing at {social_horizon['value']}%
-
-Cultural Outcomes (Spark → Growth → Horizon)
-
-- Cultural Spark is performing at {cultural_spark['value']}%
-- Cultural Growth is performing at {cultural_growth['value']}%
-- Cultural Horizon is performing at {cultural_horizon['value']}%
-
-Recommendation
-
-- Prioritise improvement in {lower(weakest['label'])}
-- Overall Impact: {analytics['overall']}%"""
+Survey responses from {summary_name or 'the uploaded survey'} indicate stronger immediate outcomes in {lower(strongest['label'])} and weaker performance in {lower(weakest['label'])}. Overall impact is {analytics['overall']}%, showing that both social and cultural impact streams now include spark, growth, and horizon proxy measures."""
 
 def load_uploaded_file(uploaded_file):
     name = uploaded_file.name.lower()
@@ -477,7 +536,16 @@ base_rows = all_mapped_rows
 c1, c2, c3 = st.columns(3)
 with c1:
     selected_show = st.selectbox("Show", shows, index=0)
-base_rows = all_mapped_rows if selected_show == "All shows" else [row for row in all_mapped_rows if row["show"] == selected_show]
+default_show = shows[0]
+base_rows = all_mapped_rows
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    selected_show = st.selectbox("Show", shows, index=0)
+if selected_show == "All shows":
+    base_rows = all_mapped_rows
+else:
+    base_rows = [row for row in all_mapped_rows if row["show"] == selected_show]
 audiences = ["All"] + sorted({row["audience"] for row in base_rows})
 locations = ["All"] + sorted({row["location"] for row in base_rows})
 with c2:
@@ -486,7 +554,14 @@ with c3:
     filter_location = st.selectbox("Location", locations)
 
 filtered_rows = [row for row in base_rows if (filter_audience == "All" or row["audience"] == filter_audience) and (filter_location == "All" or row["location"] == filter_location)]
-filtered_source_rows = [row for row in source_rows if (selected_show == "All shows" or infer_show(row) == selected_show) and (filter_audience == "All" or infer_audience(row) == filter_audience) and (filter_location == "All" or infer_location(row) == filter_location)]
+filtered_source_rows = [
+    row for row in source_rows
+    if (
+        (selected_show == "All shows" or normalize_show_name(infer_show(row)) == selected_show)
+        and (filter_audience == "All" or infer_audience(row) == filter_audience)
+        and (filter_location == "All" or infer_location(row) == filter_location)
+    )
+]
 
 analytics = compute_analytics(filtered_rows, len(source_rows))
 report_text = create_report_text(analytics, uploaded_file.name if selected_show == "All shows" else f"{uploaded_file.name} - {selected_show}")
@@ -626,4 +701,4 @@ with side_col:
     st.write(f"**Strongest area:** {analytics['strongest']['label']}")
     st.write(f"**Weakest area:** {analytics['weakest']['label']}")
     st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True) 
